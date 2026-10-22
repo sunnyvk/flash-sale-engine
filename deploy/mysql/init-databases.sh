@@ -2,7 +2,7 @@
 # Runs once, on first start of an empty MySQL volume (mysql image convention: /docker-entrypoint-initdb.d).
 # One database AND one user per service, each user restricted to its own schema, so a bug or SQL injection in
 # notification-service physically cannot touch booking_db.
-set -euo pipefail
+set -eo pipefail   # no -u: if the image sources this file (exec bit lost in git), -u would leak into the entrypoint and kill it
 
 mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" <<SQL
 CREATE DATABASE IF NOT EXISTS booking_db      CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
