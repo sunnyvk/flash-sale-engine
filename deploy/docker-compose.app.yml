@@ -1,0 +1,109 @@
+# Full stack = infrastructure (docker-compose.yml) + the three services + nginx. Use BOTH files:
+#   docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.app.yml up -d --build --wait
+# Only nginx (and, for local load tests, booking on loopback) publish ports; services reach MySQL/Redis/Kafka by service name.
+
+x-java-env: &java-env
+  JAVA_OPTS: ${JAVA_OPTS:--XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  HEALTH_DETAILS: ${HEALTH_DETAILS:-never}
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092            # the in-network listener; localhost:29092 is for services run on the host
+
+# Least privilege for the app containers: no Linux capabilities, no privilege escalation, read-only root filesystem
+# (Spring Boot only needs /tmp, which is a tmpfs). Same policy as the Kubernetes securityContext.
+x-hardened: &hardened
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: ["/tmp"]
+
+x-infra-ready: &infra-ready
+  mysql: { condition: service_healthy }
+  redis: { condition: service_healthy }
+  kafka: { condition: service_healthy }
+
+services:
+  kafka:
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"       # the image default (1 GB) is too much next to three JVMs on a laptop
+
+  booking-service:
+    build: { context: .., dockerfile: booking-service/Dockerfile }
+    image: flash-sale/booking-service:${IMAGE_TAG:-local}
+    depends_on: *infra-ready
+    environment:
+      <<: *java-env
+      BOOKING_DB_URL: "jdbc:mysql://mysql:3306/booking_db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+      BOOKING_DB_USER: ${BOOKING_DB_USER:-booking}
+      BOOKING_DB_PASSWORD: ${BOOKING_DB_PASSWORD:?set BOOKING_DB_PASSWORD in .env}
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      FORWARD_HEADERS_STRATEGY: native              # trusted proxy (nginx) in front: the login limiter sees the real client IP
+      # Local default keeps the 100-seat demo event. Production overrides this with classpath:db/migration only.
+      FLYWAY_LOCATIONS: ${BOOKING_FLYWAY_LOCATIONS:-classpath:db/migration,classpath:db/seed}
+    ports:
+      - "127.0.0.1:8081:8081"                        # loopback only: lets k6 bypass nginx's per-IP auth rate limit
+    healthcheck: &app-health
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health/readiness | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    mem_limit: 640m                                # exit code 137 (OOM-killed) means raise this
+    <<: *hardened
+    restart: unless-stopped
+
+  payment-service:
+    build: { context: .., dockerfile: payment-service/Dockerfile }
+    image: flash-sale/payment-service:${IMAGE_TAG:-local}
+    depends_on: *infra-ready
+    environment:
+      <<: *java-env
+      PAYMENT_DB_URL: "jdbc:mysql://mysql:3306/payment_db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+      PAYMENT_DB_USER: ${PAYMENT_DB_USER:-payment}
+      PAYMENT_DB_PASSWORD: ${PAYMENT_DB_PASSWORD:?set PAYMENT_DB_PASSWORD in .env}
+      PAYMENT_DEMO_DECLINED_USER_IDS: ${PAYMENT_DEMO_DECLINED_USER_IDS:-}
+      PAYMENT_DEMO_OUTAGE_USER_IDS: ${PAYMENT_DEMO_OUTAGE_USER_IDS:-}
+    healthcheck:
+      <<: *app-health
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8082/actuator/health/readiness | grep -q UP"]
+    mem_limit: 640m                                # exit code 137 (OOM-killed) means raise this
+    <<: *hardened
+    restart: unless-stopped
+
+  notification-service:
+    build: { context: .., dockerfile: notification-service/Dockerfile }
+    image: flash-sale/notification-service:${IMAGE_TAG:-local}
+    depends_on: *infra-ready
+    environment:
+      <<: *java-env
+      NOTIFICATION_DB_URL: "jdbc:mysql://mysql:3306/notification_db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+      NOTIFICATION_DB_USER: ${NOTIFICATION_DB_USER:-notification}
+      NOTIFICATION_DB_PASSWORD: ${NOTIFICATION_DB_PASSWORD:?set NOTIFICATION_DB_PASSWORD in .env}
+      NOTIFICATION_DEMO_FAILING_USER_IDS: ${NOTIFICATION_DEMO_FAILING_USER_IDS:-}
+    healthcheck:
+      <<: *app-health
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8083/actuator/health/readiness | grep -q UP"]
+    mem_limit: 640m                                # exit code 137 (OOM-killed) means raise this
+    <<: *hardened
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      booking-service: { condition: service_healthy }
+    ports:
+      # Local: http://localhost:8080. On EC2 (phase 9) set NGINX_BIND=0.0.0.0 and NGINX_PORT=80.
+      - "${NGINX_BIND:-127.0.0.1}:${NGINX_PORT:-8080}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/proxy_params.conf:/etc/nginx/proxy_params.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    mem_limit: 64m
+    restart: unless-stopped

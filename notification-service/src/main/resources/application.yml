@@ -1,0 +1,69 @@
+spring:
+  application:
+    name: notification-service
+  datasource:
+    url: ${NOTIFICATION_DB_URL:jdbc:mysql://localhost:3306/notification_db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: ${NOTIFICATION_DB_USER}
+    password: ${NOTIFICATION_DB_PASSWORD}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      connection-timeout: 3000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+  flyway:
+    locations: ${FLYWAY_LOCATIONS:classpath:db/migration}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:29092}
+    consumer:
+      group-id: notification-service
+      auto-offset-reset: earliest      # a brand-new consumer group must not skip events published before it started
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:                          # used by the retry-topic and dead-letter publishing
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    listener:
+      ack-mode: record                 # commit the offset after each record, not after a whole poll batch
+
+notification:
+  retry:
+    attempts: ${NOTIFICATION_RETRY_ATTEMPTS:4}          # 1 first try + 3 retries, then the dead-letter topic
+    delay-ms: ${NOTIFICATION_RETRY_DELAY_MS:2000}
+    multiplier: ${NOTIFICATION_RETRY_MULTIPLIER:2.0}    # 2s, 4s, 8s
+    max-delay-ms: ${NOTIFICATION_RETRY_MAX_DELAY_MS:30000}
+  demo:
+    failing-user-ids: ${NOTIFICATION_DEMO_FAILING_USER_IDS:}   # comma list; sending to these users always fails (to demo retry + DLT)
+
+kafka:
+  topics:
+    partitions: ${KAFKA_TOPIC_PARTITIONS:3}
+    replicas: ${KAFKA_TOPIC_REPLICAS:1}
+
+server:
+  port: ${SERVER_PORT:8083}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: ${HEALTH_DETAILS:never}
+
+logging:
+  structured:
+    format:
+      console: ecs
+  level:
+    root: ${LOG_LEVEL:INFO}

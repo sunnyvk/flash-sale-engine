@@ -1,0 +1,13 @@
+# The build context is the repo root, so keep it small and keep secrets out of image layers.
+**/target/
+.git/
+.github/
+.idea/
+.vscode/
+*.iml
+.env
+.env.*
+!.env.example
+loadtest/
+deploy/
+*.log

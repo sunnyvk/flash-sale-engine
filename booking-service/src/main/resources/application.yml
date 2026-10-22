@@ -1,0 +1,117 @@
+spring:
+  application:
+    name: booking-service
+  datasource:
+    # No default for user/password on purpose: a missing secret must stop startup, not fall back to something guessable.
+    url: ${BOOKING_DB_URL:jdbc:mysql://localhost:3306/booking_db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: ${BOOKING_DB_USER}
+    password: ${BOOKING_DB_PASSWORD}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:20}   # tuned in phase 7 against the load test
+      connection-timeout: 3000                # fail fast (ms) instead of queueing requests forever under load
+  jpa:
+    open-in-view: false                       # no lazy loading from controllers; keeps DB connections short-lived
+    hibernate:
+      ddl-auto: validate                      # Flyway owns the schema; Hibernate may only check it
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+  flyway:
+    # Prod sets FLYWAY_LOCATIONS=classpath:db/migration so demo seed data never runs there.
+    locations: ${FLYWAY_LOCATIONS:classpath:db/migration,classpath:db/seed}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
+      timeout: 500ms                          # a slow Redis must degrade to the DB path, not stall requests
+      connect-timeout: 500ms                  # same for a Redis that is down: fail fast, then fall back to MySQL
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:29092}
+    consumer:
+      group-id: booking-service
+      auto-offset-reset: earliest      # a brand-new consumer group must not skip events published before it started
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: record
+    producer:
+      acks: all                        # a send only succeeds once the broker has the record; the relay marks PUBLISHED on success
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true       # broker de-duplicates producer retries and keeps per-partition order
+        delivery.timeout.ms: 10000
+        request.timeout.ms: 5000
+        max.block.ms: 5000             # an unreachable broker must fail the send fast, not hang the relay thread
+
+booking:
+  hold-ttl: ${BOOKING_HOLD_TTL:PT5M}                           # ISO-8601 duration: how long a seat stays HELD awaiting payment
+  locking-strategy: ${BOOKING_LOCKING_STRATEGY:ATOMIC_UPDATE}  # ATOMIC_UPDATE | PESSIMISTIC | OPTIMISTIC
+  idempotency:
+    in-progress-ttl: ${IDEMPOTENCY_IN_PROGRESS_TTL:PT30S}      # a crashed request blocks its key this long
+    completed-ttl: ${IDEMPOTENCY_COMPLETED_TTL:PT24H}          # how long retries are answered from the stored result
+  outbox:
+    enabled: ${OUTBOX_ENABLED:true}
+    batch-size: ${OUTBOX_BATCH_SIZE:50}
+    poll-interval: ${OUTBOX_POLL_INTERVAL:PT0.5S}
+    send-timeout: ${OUTBOX_SEND_TIMEOUT:PT5S}
+    retention: ${OUTBOX_RETENTION:P7D}                 # PUBLISHED rows older than this are deleted
+                                                        # NOTE: enabled=false switches off ALL Kafka messaging (relay, saga listener, reaper)
+  retry:                                                # payment.events consumer
+    attempts: ${BOOKING_RETRY_ATTEMPTS:4}
+    delay-ms: ${BOOKING_RETRY_DELAY_MS:2000}
+    multiplier: ${BOOKING_RETRY_MULTIPLIER:2.0}
+    max-delay-ms: ${BOOKING_RETRY_MAX_DELAY_MS:30000}
+  reaper:                                               # cancels bookings whose payment never arrived
+    interval: ${BOOKING_REAPER_INTERVAL:PT30S}
+    grace: ${BOOKING_REAPER_GRACE:PT30S}                # extra time after hold-ttl, so a payment landing right at the deadline wins
+    batch-size: ${BOOKING_REAPER_BATCH_SIZE:100}
+
+jwt:
+  secret: ${JWT_SECRET}                                # NO default on purpose: at least 32 characters, from the secret store
+  issuer: ${JWT_ISSUER:https://booking.flashsale.local}
+  access-token-ttl: ${JWT_ACCESS_TOKEN_TTL:PT15M}      # short-lived: a stolen token stops working quickly
+
+auth:
+  bcrypt-strength: ${BCRYPT_STRENGTH:10}               # work factor; each +1 doubles the hashing time
+  bootstrap-admin:                                     # creates the first ADMIN at startup if both are set; nobody can self-register as ADMIN
+    username: ${ADMIN_USERNAME:}
+    password: ${ADMIN_PASSWORD:}
+  login-limit:                                         # brute-force guard, counted per (username, client IP) in Redis
+    max-attempts: ${LOGIN_MAX_ATTEMPTS:5}              # attempts allowed per window, successful or not; the next one gets 429
+    window: ${LOGIN_WINDOW:PT15M}
+  refresh:
+    ttl: ${REFRESH_TOKEN_TTL:P7D}                      # how long a refresh token lives; each use issues a new one
+
+kafka:
+  topics:
+    partitions: ${KAFKA_TOPIC_PARTITIONS:3}
+    replicas: ${KAFKA_TOPIC_REPLICAS:1}
+
+server:
+  port: ${SERVER_PORT:8081}
+  forward-headers-strategy: ${FORWARD_HEADERS_STRATEGY:none}   # set to 'native' ONLY behind a trusted proxy (nginx/ALB), else the login limiter sees the proxy's IP
+  shutdown: graceful                          # finish in-flight bookings on SIGTERM (Kubernetes rolling updates)
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true                         # /actuator/health/liveness and /readiness for Kubernetes
+      show-details: ${HEALTH_DETAILS:never}   # 'always' locally; 'never' in prod so health does not leak topology
+      group:
+        readiness:
+          include: readinessState,db           # Redis is optional (we fail open), so its outage must not make pods unready
+
+logging:
+  structured:
+    format:
+      console: ecs                            # one JSON object per line; MDC (correlationId) is included automatically
+  level:
+    root: ${LOG_LEVEL:INFO}

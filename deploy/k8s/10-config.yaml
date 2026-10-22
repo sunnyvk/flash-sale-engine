@@ -1,0 +1,21 @@
+# Non-secret settings shared by the three services. Anything secret lives in the Secret "app-secrets",
+# which is created from your .env and is NEVER committed (see deploy/k8s/README.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: flash-sale
+data:
+  JAVA_OPTS: "-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError"
+  LOG_LEVEL: "INFO"
+  HEALTH_DETAILS: "never"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"        # also pinned because Kubernetes can inject a bogus REDIS_PORT (see enableServiceLinks below)
+  BOOKING_DB_URL: "jdbc:mysql://mysql:3306/booking_db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+  BOOKING_DB_USER: "booking"
+  PAYMENT_DB_URL: "jdbc:mysql://mysql:3306/payment_db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+  PAYMENT_DB_USER: "payment"
+  NOTIFICATION_DB_URL: "jdbc:mysql://mysql:3306/notification_db?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true"
+  NOTIFICATION_DB_USER: "notification"
+  FORWARD_HEADERS_STRATEGY: "native"   # the ingress controller is a trusted proxy in the pod network

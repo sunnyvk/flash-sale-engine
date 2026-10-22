@@ -1,0 +1,34 @@
+# Needs an ingress controller (kind: see README). Without one, use `kubectl port-forward svc/booking-service 8081:8081`.
+# Two Ingresses on one host: the longer path (/api/v1/auth) wins and gets a strict per-IP rate limit,
+# the same second line of defence as the nginx config in docker-compose.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: booking-api
+  namespace: flash-sale
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 16k
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: flashsale.local
+    http:
+      paths:
+      - {path: /api, pathType: Prefix, backend: {service: {name: booking-service, port: {number: 8081}}}}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: booking-auth
+  namespace: flash-sale
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 16k
+    nginx.ingress.kubernetes.io/limit-rps: "5"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "4"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: flashsale.local
+    http:
+      paths:
+      - {path: /api/v1/auth, pathType: Prefix, backend: {service: {name: booking-service, port: {number: 8081}}}}

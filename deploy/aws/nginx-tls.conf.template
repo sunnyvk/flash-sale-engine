@@ -1,0 +1,71 @@
+# Production edge: TLS termination for ONE domain. The official nginx image fills in ${DOMAIN} at start-up
+# (envsubst on /etc/nginx/templates/*.template); nginx's own $variables are left alone.
+
+limit_req_zone $binary_remote_addr zone=auth:10m rate=5r/s;     # per client IP, across ALL usernames
+limit_req_status 429;
+
+upstream booking { server booking-service:8081; keepalive 32; }
+
+# Port 80, any Host that is not our domain (scanners hitting the bare IP): drop the connection.
+# Only /healthz answers, for the container health check and uptime monitors.
+server {
+    listen 80 default_server;
+    server_tokens off;
+    location = /healthz {
+        access_log off;
+        proxy_pass http://booking/actuator/health/readiness;
+    }
+    location / { return 444; }
+}
+
+# Port 80, our domain: everything goes to HTTPS. The target is the configured domain, NOT $host, so a forged
+# Host header cannot turn this into an open redirect.
+server {
+    listen 80;
+    server_name ${DOMAIN};
+    server_tokens off;
+    location / { return 301 https://${DOMAIN}$request_uri; }
+}
+
+# Port 443, unknown server name (bare IP, other domains): refuse the TLS handshake itself.
+server {
+    listen 443 ssl default_server;
+    ssl_reject_handshake on;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${DOMAIN};
+    server_tokens off;
+    client_max_body_size 16k;
+
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;                 # no SSLv3 / TLS 1.0 / 1.1
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;                       # tickets would weaken forward secrecy unless keys are rotated
+
+    add_header Strict-Transport-Security "max-age=86400" always;   # short on purpose; raise it once HTTPS is proven stable
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Cache-Control "no-store" always;    # API responses carry personal data and tokens
+
+    location /api/v1/auth/ {
+        limit_req zone=auth burst=20 nodelay;
+        include /etc/nginx/proxy_params.conf;
+        proxy_pass http://booking;
+    }
+
+    location /api/ {
+        include /etc/nginx/proxy_params.conf;
+        proxy_pass http://booking;
+    }
+
+    location = /healthz {
+        access_log off;
+        proxy_pass http://booking/actuator/health/readiness;
+    }
+
+    location / { return 404; }
+}

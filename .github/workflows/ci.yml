@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One run per branch; a newer push cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # 1. Compile, run every unit + Testcontainers integration test, enforce the 80% JaCoCo gate.
+  #    ubuntu-latest has Docker, so Testcontainers works exactly as on a laptop.
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+      - name: Build, test, coverage gate
+        run: mvn -B verify
+      - name: Upload test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            **/target/surefire-reports/
+            **/target/site/jacoco/
+          retention-days: 7
+
+  # 2. Validate the Kubernetes manifests without a cluster: render with kustomize, check against the API schemas.
+  validate-k8s:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          sudo mv kubeconform /usr/local/bin/
+      - name: Render and validate
+        run: |
+          kubectl kustomize deploy/k8s > /tmp/rendered.yaml
+          kubeconform -strict -summary -ignore-missing-schemas /tmp/rendered.yaml
+          kubeconform -strict -summary deploy/k8s/00-namespace.yaml
+
+  # 3. The real end-to-end test: build the three images, start the WHOLE stack with compose, run the smoke test
+  #    (login -> book -> idempotent replay -> Kafka saga -> CONFIRMED -> logout).
+  e2e-compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create a throwaway .env with random secrets
+        run: |
+          cp .env.example .env
+          # Every CHANGE_ME... placeholder becomes a fresh random value; nothing here is a real secret.
+          perl -pi -e 's/CHANGE_ME\w*/join "", map { ("a".."z", 0..9)[rand 36] } 1..32/e' .env
+      - name: Start the full stack
+        run: docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.app.yml up -d --build --wait --wait-timeout 300
+      - name: Smoke test through nginx
+        run: bash deploy/smoke-test.sh
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.app.yml logs --no-color --tail=200
+      - name: Tear down
+        if: always()
+        run: docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.app.yml down -v
+
+  # 3b. The production TLS nginx config cannot be exercised on the compose stack (no certificate), so render the template
+  # with a throwaway self-signed cert and let nginx itself check the syntax.
+  validate-nginx-tls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: nginx -t on the rendered production config
+        run: |
+          export DOMAIN=flash.example.test
+          mkdir -p /tmp/nginx-check/conf.d /tmp/nginx-check/le/live/$DOMAIN
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=$DOMAIN" \
+            -keyout /tmp/nginx-check/le/live/$DOMAIN/privkey.pem -out /tmp/nginx-check/le/live/$DOMAIN/fullchain.pem
+          docker run --rm -e DOMAIN \
+            -v "$PWD/deploy/aws/nginx-tls.conf.template:/etc/nginx/templates/default.conf.template:ro" \
+            -v "$PWD/deploy/nginx/proxy_params.conf:/etc/nginx/proxy_params.conf:ro" \
+            -v /tmp/nginx-check/le:/etc/letsencrypt:ro \
+            --add-host booking-service:127.0.0.1 --add-host payment-service:127.0.0.1 --add-host notification-service:127.0.0.1 \
+            --entrypoint sh nginx:1.27-alpine -c 'envsubst "\$DOMAIN" < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -t'
+
+  # 4. Publish the three images to GitHub Container Registry. Only on main, only after everything above passed.
+  publish-images:
+    needs: [build-test, validate-k8s, validate-nginx-tls, e2e-compose]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write           # the built-in GITHUB_TOKEN may push to this repo's packages; no stored credentials
+    strategy:
+      matrix:
+        service: [booking-service, payment-service, notification-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/${{ matrix.service }}   # lower-cased automatically
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # 5. Optional deploy to the EC2 instance. Skipped until the repository variable AWS_DEPLOY_ROLE_ARN exists, so the
+  # pipeline stays green for anyone who forks the repo. Needs no stored AWS keys: GitHub's OIDC token is exchanged for
+  # short-lived credentials of a role that may only run commands on this one instance (see deploy/aws/README.md).
+  deploy:
+    needs: [publish-images]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production     # add required reviewers here for a manual approval gate
+    concurrency: deploy-production
+    permissions:
+      id-token: write           # lets the job request the OIDC token
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+      - name: Run deploy.sh on the instance through SSM
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ vars.AWS_INSTANCE_ID }}" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy ${GITHUB_SHA}" \
+            --parameters "commands=[\"/opt/flashsale/repo/deploy/aws/deploy.sh ${GITHUB_SHA}\"]" \
+            --query Command.CommandId --output text)
+          aws ssm wait command-executed --command-id "$CMD_ID" --instance-id "${{ vars.AWS_INSTANCE_ID }}" || true
+          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "${{ vars.AWS_INSTANCE_ID }}" \
+            --query '[Status,StandardOutputContent,StandardErrorContent]' --output text
+          test "$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "${{ vars.AWS_INSTANCE_ID }}" --query Status --output text)" = Success

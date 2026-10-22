@@ -1,0 +1,22 @@
+# kubectl apply -k deploy/k8s     (create the Secret and the mysql-init ConfigMap first; see deploy/k8s/README.md)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: flash-sale
+resources:
+- 00-namespace.yaml
+- 10-config.yaml
+- 20-mysql.yaml
+- 21-redis.yaml
+- 22-kafka.yaml
+- 30-booking.yaml
+- 31-payment.yaml
+- 32-notification.yaml
+- 40-ingress.yaml
+# Change the tag here (or with `kustomize edit set image`) instead of editing the Deployments.
+images:
+- name: flash-sale/booking-service
+  newTag: local
+- name: flash-sale/payment-service
+  newTag: local
+- name: flash-sale/notification-service
+  newTag: local

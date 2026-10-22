@@ -1,0 +1,43 @@
+# Redis holds only short-lived data (idempotency keys, login counters, revoked token ids), and MySQL stays the
+# source of truth, so no persistence: a restart loses nothing that cannot be rebuilt.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: flash-sale
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: redis}
+  template:
+    metadata:
+      labels: {app: redis}
+    spec:
+      enableServiceLinks: false
+      securityContext: {runAsNonRoot: true, runAsUser: 999, runAsGroup: 999}
+      containers:
+      - name: redis
+        image: redis:7.4-alpine
+        command: ["redis-server", "--requirepass", "$(REDIS_PASSWORD)", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
+        ports:
+        - {name: redis, containerPort: 6379}
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: app-secrets, key: REDIS_PASSWORD}
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 128Mi}
+        readinessProbe:
+          exec: {command: ["sh", "-c", "redis-cli -a \"$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]}
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: flash-sale
+spec:
+  selector: {app: redis}
+  ports:
+  - {name: redis, port: 6379, targetPort: redis}

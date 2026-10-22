@@ -1,0 +1,72 @@
+# One MySQL, three schemas, three users: created by deploy/mysql/init-databases.sh on the first start of an empty volume.
+# The script is loaded as the ConfigMap "mysql-init" (kubectl create configmap ... --from-file, see README).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: flash-sale
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels: {app: mysql}
+  template:
+    metadata:
+      labels: {app: mysql}
+    spec:
+      enableServiceLinks: false
+      containers:
+      - name: mysql
+        image: mysql:8.4
+        args: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci", "--default-time-zone=+00:00"]
+        ports:
+        - {name: mysql, containerPort: 3306}
+        env:
+        - {name: TZ, value: UTC}
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: app-secrets, key: MYSQL_ROOT_PASSWORD}
+        - name: BOOKING_DB_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: app-secrets, key: BOOKING_DB_PASSWORD}
+        - name: PAYMENT_DB_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: app-secrets, key: PAYMENT_DB_PASSWORD}
+        - name: NOTIFICATION_DB_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: app-secrets, key: NOTIFICATION_DB_PASSWORD}
+        resources:
+          requests: {cpu: 100m, memory: 512Mi}
+          limits: {memory: 768Mi}
+        startupProbe:
+          exec: {command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\" --silent"]}
+          periodSeconds: 5
+          failureThreshold: 36
+        readinessProbe:
+          exec: {command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\" --silent"]}
+          periodSeconds: 10
+        volumeMounts:
+        - {name: data, mountPath: /var/lib/mysql}
+        - {name: init, mountPath: /docker-entrypoint-initdb.d}
+      volumes:
+      - name: init
+        configMap:
+          name: mysql-init
+          defaultMode: 0555
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests: {storage: 2Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: flash-sale
+spec:
+  selector: {app: mysql}
+  ports:
+  - {name: mysql, port: 3306, targetPort: mysql}

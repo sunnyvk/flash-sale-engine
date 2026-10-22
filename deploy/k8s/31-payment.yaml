@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: flash-sale
+  labels: {app: payment-service}
+spec:
+  replicas: 1
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}     # never drop below the current capacity during a rollout
+  selector:
+    matchLabels: {app: payment-service}
+  template:
+    metadata:
+      labels: {app: payment-service}
+    spec:
+      # Without this Kubernetes injects env vars like REDIS_PORT=tcp://10.0.0.5:6379 for every Service in the
+      # namespace, which collides with Spring's own REDIS_PORT / KAFKA_* settings. Service DNS names are all we use.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 45                    # > Spring's 30 s graceful-shutdown window
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+      - name: wait-for-mysql                              # MySQL opens its port only after first-run init, so this also covers the schema setup
+        image: busybox:1.37
+        command: ["sh", "-c", "until nc -z mysql 3306; do echo waiting for mysql; sleep 2; done"]
+        resources:
+          requests: {cpu: 10m, memory: 8Mi}
+          limits: {memory: 32Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: ["ALL"]}
+      containers:
+      - name: app
+        image: flash-sale/payment-service:local                    # kustomize "images:" rewrites the tag; CI pushes to a registry
+        imagePullPolicy: IfNotPresent
+        ports:
+        - {name: http, containerPort: 8082}
+        envFrom:
+        - configMapRef: {name: app-config}
+        env:
+        - name: PAYMENT_DB_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: app-secrets, key: PAYMENT_DB_PASSWORD}
+        resources:
+          requests: {cpu: 100m, memory: 384Mi}
+          limits: {memory: 640Mi}                    # no CPU limit; exit code 137 (OOMKilled) means raise this: CFS throttling hurts JVM startup and latency
+        startupProbe:                                      # Spring + Flyway + Kafka take a while; don't let liveness kill it
+          httpGet: {path: /actuator/health/liveness, port: http}
+          periodSeconds: 5
+          failureThreshold: 36
+        readinessProbe:                                    # out of the Service when the DB is unreachable
+          httpGet: {path: /actuator/health/readiness, port: http}
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet: {path: /actuator/health/liveness, port: http}
+          periodSeconds: 10
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec: {command: ["sh", "-c", "sleep 5"]}      # let endpoint removal propagate before SIGTERM, so no request hits a dying pod
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: ["ALL"]}
+        volumeMounts:
+        - {name: tmp, mountPath: /tmp}                   # the only writable path
+      volumes:
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service
+  namespace: flash-sale
+  labels: {app: payment-service}
+spec:
+  selector: {app: payment-service}
+  ports:
+  - {name: http, port: 8082, targetPort: http}

@@ -1,0 +1,37 @@
+# Production overlay. Use it as the THIRD file, on top of the two from phase 8:
+#   docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.app.yml -f deploy/aws/docker-compose.prod.yml up -d --wait
+# (deploy/aws/deploy.sh does exactly that.) Differences from the laptop stack:
+#   - the three services run IMAGES BUILT BY CI (pulled from GHCR), never compiled on the server;
+#   - nginx publishes 80 and 443 and terminates TLS with the Let's Encrypt certificate.
+
+services:
+  booking-service:
+    build: !reset null
+    image: ghcr.io/${GHCR_REPO:?set GHCR_REPO (lower-case owner/repo)}/booking-service:${IMAGE_TAG:-latest}
+  payment-service:
+    build: !reset null
+    image: ghcr.io/${GHCR_REPO}/payment-service:${IMAGE_TAG:-latest}
+  notification-service:
+    build: !reset null
+    image: ghcr.io/${GHCR_REPO}/notification-service:${IMAGE_TAG:-latest}
+
+  nginx:
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in the SSM parameters}
+    ports: !override
+      - "80:80"
+      - "443:443"
+    volumes: !override
+      - ./aws/nginx-tls.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/proxy_params.conf:/etc/nginx/proxy_params.conf:ro
+      - letsencrypt:/etc/letsencrypt:ro
+
+  # Not part of the running stack (profile "tools"): only started by issue-cert.sh / renew-cert.sh with `compose run`.
+  certbot:
+    image: certbot/certbot:v3.3.0
+    profiles: ["tools"]
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+
+volumes:
+  letsencrypt: {}          # certificates live here, owned by certbot (issue-cert.sh), read-only for nginx
