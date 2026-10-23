@@ -97,9 +97,29 @@ jobs:
             --add-host booking-service:127.0.0.1 --add-host payment-service:127.0.0.1 --add-host notification-service:127.0.0.1 \
             --entrypoint sh nginx:1.27-alpine -c 'envsubst "\$DOMAIN" < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -t'
 
+  # 3c. Monitoring config is code too: a typo in an alert rule or dashboard should fail the build, not the first incident.
+  validate-observability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: promtool checks the Prometheus config and alert rules
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$PWD/deploy/observability/alerts.yml:/etc/prometheus/alerts.yml:ro" \
+            prom/prometheus:v2.55.1 check config /etc/prometheus/prometheus.yml
+      - name: Grafana dashboard is valid JSON with unique panel ids
+        run: |
+          jq -e '([.panels[].id] | length) == ([.panels[].id] | unique | length)' deploy/observability/grafana/dashboards/flash-sale.json
+      - name: Compose overlay renders
+        run: |
+          printf 'MYSQL_ROOT_PASSWORD=x\nBOOKING_DB_PASSWORD=x\nPAYMENT_DB_PASSWORD=x\nNOTIFICATION_DB_PASSWORD=x\nREDIS_PASSWORD=x\nJWT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nGRAFANA_ADMIN_PASSWORD=x\n' > /tmp/obs.env
+          docker compose --env-file /tmp/obs.env -f deploy/docker-compose.yml -f deploy/docker-compose.app.yml -f deploy/docker-compose.observability.yml config > /dev/null
+
   # 4. Publish the three images to GitHub Container Registry. Only on main, only after everything above passed.
   publish-images:
-    needs: [build-test, validate-k8s, validate-nginx-tls, e2e-compose]
+    needs: [build-test, validate-k8s, validate-nginx-tls, validate-observability, e2e-compose]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30

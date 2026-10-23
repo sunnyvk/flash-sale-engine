@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: flash-sale
+    folder: Flash Sale
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false        # the JSON in git is the source of truth; edit it there
+    options:
+      path: /etc/grafana/dashboards

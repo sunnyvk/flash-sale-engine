@@ -26,6 +26,12 @@ Step "3. protected route without a token is rejected"
 $code = StatusOf { Invoke-RestMethod -Method Post "$BaseUrl/api/v1/bookings" -Headers $json -Body (@{eventId=$EventId} | ConvertTo-Json) }
 if ($code -ne 401) { Fail "expected 401 without a token, got $code" }
 
+if ($HealthPath -eq "/healthz") {   # only meaningful behind the proxy; booking-service itself serves it to Prometheus
+  Step "3b. metrics are NOT reachable through the public proxy"
+  $code = StatusOf { Invoke-RestMethod "$BaseUrl/actuator/prometheus" }
+  if ($code -ne 404) { Fail "/actuator/prometheus must not be exposed through nginx (got HTTP $code)" }
+}
+
 Step "4. availability (public)"
 $free = (Invoke-RestMethod "$BaseUrl/api/v1/events/$EventId/availability").available
 Write-Host "free seats: $free"

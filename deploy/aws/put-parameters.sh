@@ -29,4 +29,14 @@ if ! aws ssm get-parameter --region "$REGION" --name "$P/ADMIN_PASSWORD" >/dev/n
   put ADMIN_PASSWORD "$ADMIN_PW" SecureString
   echo "Admin login created. username: admin   password: $ADMIN_PW   (shown once; also readable in SSM)"
 fi
+# Optional monitoring: OBSERVABILITY=1 ./put-parameters.sh  (Prometheus + Grafana on the instance, reachable only through
+# an SSM port-forward, see README). Adds about 600 MB of RAM: fine on t3.large, too much for t3.medium.
+if [ "${OBSERVABILITY:-0}" = 1 ]; then
+  put OBSERVABILITY 1 String
+  if ! aws ssm get-parameter --region "$REGION" --name "$P/GRAFANA_ADMIN_PASSWORD" >/dev/null 2>&1; then
+    GRAFANA_PW="Gf$(gen 12)"
+    put GRAFANA_ADMIN_PASSWORD "$GRAFANA_PW" SecureString
+    echo "Grafana login created. username: admin   password: $GRAFANA_PW   (shown once; also readable in SSM)"
+  fi
+fi
 echo "Parameters stored under $P in $REGION."

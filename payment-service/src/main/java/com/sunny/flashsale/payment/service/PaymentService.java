@@ -5,6 +5,7 @@ import com.sunny.flashsale.payment.gateway.PaymentDeclinedException;
 import com.sunny.flashsale.payment.gateway.PaymentGateway;
 import com.sunny.flashsale.payment.repository.PaymentRepository;
 import com.sunny.flashsale.payment.repository.PaymentRepository.PaymentRow;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -29,11 +30,13 @@ public class PaymentService {
     private final PaymentRepository payments;
     private final PaymentRecorder recorder;
     private final PaymentGateway gateway;
+    private final MeterRegistry metrics;
 
-    public PaymentService(PaymentRepository payments, PaymentRecorder recorder, PaymentGateway gateway) {
+    public PaymentService(PaymentRepository payments, PaymentRecorder recorder, PaymentGateway gateway, MeterRegistry metrics) {
         this.payments = payments;
         this.recorder = recorder;
         this.gateway = gateway;
+        this.metrics = metrics;
     }
 
     public void handle(BookingEvent event) {
@@ -55,14 +58,17 @@ public class PaymentService {
             gateway.charge(payment.bookingId(), payment.userId(), payment.amount());
         } catch (PaymentDeclinedException e) {
             recorder.recordOutcome(payment.bookingId(), payment.userId(), payment.amount(), false, e.getMessage());
+            count("declined");
             log.info("Payment declined: bookingId={} reason={}", payment.bookingId(), e.getMessage());
             return;
         }
         if (recorder.recordOutcome(payment.bookingId(), payment.userId(), payment.amount(), true, null)) {
+            count("succeeded");
             log.info("Payment succeeded: bookingId={}", payment.bookingId());
         } else {
             // The booking was cancelled while we were charging: the money moved but the sale is dead. Give it back.
             gateway.refund(payment.bookingId(), payment.amount());
+            count("refunded_late");
             log.warn("Charge finished after the booking was cancelled, refunded: bookingId={}", payment.bookingId());
         }
     }
@@ -82,10 +88,16 @@ public class PaymentService {
             case "SUCCEEDED" -> {
                 gateway.refund(payment.bookingId(), payment.amount());
                 if (recorder.recordRefund(payment.bookingId(), payment.userId(), payment.amount(), event.reason())) {
+                    count("refunded");
                     log.info("Payment refunded: bookingId={} reason={}", payment.bookingId(), event.reason());
                 }
             }
             default -> log.debug("Payment is {}, nothing to undo: bookingId={}", payment.status(), payment.bookingId());
         }
+    }
+
+    /** outcome: succeeded | declined | refunded | refunded_late (charged, then the booking was cancelled meanwhile). */
+    private void count(String outcome) {
+        metrics.counter("flashsale.payments", "outcome", outcome).increment();
     }
 }

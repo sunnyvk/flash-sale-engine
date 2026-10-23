@@ -1,6 +1,7 @@
 package com.sunny.flashsale.booking.saga;
 
 import com.sunny.flashsale.booking.config.BookingProperties;
+import com.sunny.flashsale.booking.metrics.BookingMetrics;
 import com.sunny.flashsale.booking.service.BookingService;
 import com.sunny.flashsale.common.error.ApiException;
 import org.slf4j.Logger;
@@ -35,16 +36,19 @@ public class PendingBookingReaper {
     private final Clock clock;
     private final Duration grace;
     private final int batchSize;
+    private final BookingMetrics metrics;
 
     public PendingBookingReaper(JdbcTemplate jdbc, BookingService bookings, BookingProperties properties, Clock clock,
                                 @Value("${booking.reaper.grace:PT30S}") Duration grace,
-                                @Value("${booking.reaper.batch-size:100}") int batchSize) {
+                                @Value("${booking.reaper.batch-size:100}") int batchSize,
+                                BookingMetrics metrics) {
         this.jdbc = jdbc;
         this.bookings = bookings;
         this.properties = properties;
         this.clock = clock;
         this.grace = grace;
         this.batchSize = batchSize;
+        this.metrics = metrics;
     }
 
     @Scheduled(fixedDelayString = "${booking.reaper.interval:PT30S}", initialDelayString = "${booking.reaper.interval:PT30S}")
@@ -73,6 +77,7 @@ public class PendingBookingReaper {
             }
         }
         if (cancelled > 0) {
+            metrics.reaped(cancelled);
             log.warn("Reaper cancelled {} booking(s) with no payment outcome", cancelled);
         }
         return cancelled;

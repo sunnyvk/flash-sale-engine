@@ -6,9 +6,11 @@ import com.sunny.flashsale.booking.idempotency.IdempotencyStore.Bypass;
 import com.sunny.flashsale.booking.idempotency.IdempotencyStore.InProgress;
 import com.sunny.flashsale.booking.idempotency.IdempotencyStore.Mismatch;
 import com.sunny.flashsale.booking.idempotency.IdempotencyStore.Replay;
+import com.sunny.flashsale.booking.metrics.BookingMetrics;
 import com.sunny.flashsale.booking.service.BookingErrors;
 import com.sunny.flashsale.booking.service.BookingService;
 import com.sunny.flashsale.common.error.ApiException;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -41,12 +43,13 @@ class IdempotentBookingServiceTest {
     @Mock BookingService bookingService;
     @Mock IdempotencyStore store;
 
+    private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private IdempotentBookingService service;
     private final Booking booking = new Booking("b-1", USER, EVENT, 42L, new BigDecimal("1500.00"), KEY);
 
     @BeforeEach
     void setUp() {
-        service = new IdempotentBookingService(bookingService, store);
+        service = new IdempotentBookingService(bookingService, store, new BookingMetrics(registry));
     }
 
     @Test
@@ -203,5 +206,53 @@ class IdempotentBookingServiceTest {
         assertThat(IdempotentBookingService.fingerprint(1, "A-001")).isNotEqualTo(IdempotentBookingService.fingerprint(1, "A-002"));
         assertThat(IdempotentBookingService.fingerprint(1, null)).isEqualTo(IdempotentBookingService.fingerprint(1, "  "));
         assertThat(IdempotentBookingService.fingerprint(1, null)).hasSize(64);
+    }
+
+    // ------------------------------------------------------------------ metrics
+
+    private double attempts(String outcome) {
+        return registry.counter("flashsale.booking.attempts", "outcome", outcome).count();
+    }
+
+    @Test
+    @DisplayName("metrics: a new booking counts 'created', its replay counts 'replayed'")
+    void countsCreatedAndReplayed() {
+        when(store.begin(USER, KEY, FP)).thenReturn(new Acquired("lock"), new Replay("b-1"));
+        when(bookingService.book(USER, EVENT, SEAT, KEY)).thenReturn(booking);
+        when(bookingService.get("b-1")).thenReturn(booking);
+
+        service.book(USER, EVENT, SEAT, KEY);
+        service.book(USER, EVENT, SEAT, KEY);
+
+        assertThat(attempts("created")).isEqualTo(1.0);
+        assertThat(attempts("replayed")).isEqualTo(1.0);
+    }
+
+    @Test
+    @DisplayName("metrics: sold out and seat-taken are counted separately, and the exception still reaches the caller")
+    void countsFailuresByCause() {
+        when(store.begin(USER, KEY, FP)).thenReturn(new Acquired("lock"));
+        when(bookingService.book(USER, EVENT, SEAT, KEY))
+                .thenThrow(BookingErrors.noSeatAvailable())
+                .thenThrow(BookingErrors.seatUnavailable())
+                .thenThrow(new IllegalStateException("boom"));
+
+        assertThatThrownBy(() -> service.book(USER, EVENT, SEAT, KEY)).isInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> service.book(USER, EVENT, SEAT, KEY)).isInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> service.book(USER, EVENT, SEAT, KEY)).isInstanceOf(IllegalStateException.class);
+
+        assertThat(attempts("sold_out")).isEqualTo(1.0);
+        assertThat(attempts("seat_unavailable")).isEqualTo(1.0);
+        assertThat(attempts("error")).isEqualTo(1.0);
+    }
+
+    @Test
+    @DisplayName("metrics: a request still in progress counts 'in_progress'")
+    void countsInProgress() {
+        when(store.begin(USER, KEY, FP)).thenReturn(new InProgress());
+
+        assertThatThrownBy(() -> service.book(USER, EVENT, SEAT, KEY)).isInstanceOf(ApiException.class);
+
+        assertThat(attempts("in_progress")).isEqualTo(1.0);
     }
 }

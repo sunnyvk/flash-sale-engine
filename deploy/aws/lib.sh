@@ -14,11 +14,15 @@ log() { echo "[$(date -u +%H:%M:%S)] $*"; }
 require_root() { [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"; }
 
 # docker compose with the three files and the generated .env. Relative paths inside the files resolve against deploy/.
+# Optional Prometheus + Grafana overlay: on when the SSM parameter OBSERVABILITY is 1 (read through the generated .env, so
+# every script, including renew-cert.sh, sees the same file list and `up --remove-orphans` never deletes the monitoring).
 compose() {
-  docker compose --env-file "$ENV_FILE" \
-    -f "$REPO_DIR/deploy/docker-compose.yml" \
-    -f "$REPO_DIR/deploy/docker-compose.app.yml" \
-    -f "$REPO_DIR/deploy/aws/docker-compose.prod.yml" "$@"
+  local files=(-f "$REPO_DIR/deploy/docker-compose.yml" -f "$REPO_DIR/deploy/docker-compose.app.yml" \
+               -f "$REPO_DIR/deploy/aws/docker-compose.prod.yml")
+  if [ -f "$ENV_FILE" ] && [ "$(env_get OBSERVABILITY)" = 1 ]; then
+    files+=(-f "$REPO_DIR/deploy/docker-compose.observability.yml")
+  fi
+  docker compose --env-file "$ENV_FILE" "${files[@]}" "$@"
 }
 
 # Reads KEY from the generated .env (grep instead of "source": the file holds secrets and must never be executed).

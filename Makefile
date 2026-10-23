@@ -3,7 +3,7 @@ COMPOSE := docker compose --env-file .env -f deploy/docker-compose.yml
 # Load .env into the environment of the command that follows (for `mvn spring-boot:run`).
 WITH_ENV := set -a; source .env; set +a;
 
-.PHONY: stack-up stack-down smoke images loadtest-reset loadtest help init infra-up infra-down infra-reset infra-logs build test run-booking run-payment run-notification health
+.PHONY: obs-up obs-down stack-up stack-down smoke images loadtest-reset loadtest help init infra-up infra-down infra-reset infra-logs build test run-booking run-payment run-notification health
 
 help:            ## list targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/ -/'
@@ -55,6 +55,7 @@ images:          ## build the three service images
 	docker build -f notification-service/Dockerfile -t flash-sale/notification-service:local .
 
 stack-up:        ## whole stack (infra + 3 services + nginx) in Docker, waits until healthy
+	bash deploy/check-env.sh
 	$(STACK) up -d --build --wait
 
 stack-down:      ## stop the whole stack (add -v by hand to wipe data)
@@ -62,3 +63,13 @@ stack-down:      ## stop the whole stack (add -v by hand to wipe data)
 
 smoke:           ## end-to-end check against the running stack on http://localhost:8080
 	bash deploy/smoke-test.sh
+
+OBS := $(STACK) -f deploy/docker-compose.observability.yml
+
+obs-up:          ## full stack + Prometheus (:9090) + Grafana (:3000); needs GRAFANA_ADMIN_PASSWORD in .env
+	bash deploy/check-env.sh
+	@grep -qE '^GRAFANA_ADMIN_PASSWORD=.+' .env || (echo "FAIL: add GRAFANA_ADMIN_PASSWORD=<choose one> to .env"; exit 1)
+	$(OBS) up -d --build --wait
+
+obs-down:        ## stop everything started by obs-up (data volumes are kept)
+	$(OBS) down

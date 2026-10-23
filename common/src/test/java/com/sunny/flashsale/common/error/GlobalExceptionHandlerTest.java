@@ -23,6 +23,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -71,6 +72,35 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
+    @DisplayName("exhausted DB connection pool (wrapped in framework exceptions) returns 503 SERVICE_BUSY with Retry-After, not 500")
+    void poolExhaustedIsServiceUnavailable() throws Exception {
+        mvc.perform(get("/test/pool-timeout").header(CorrelationIdFilter.HEADER, "corr-2"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(header().string("Retry-After", "1"))
+                .andExpect(jsonPath("$.status").value(503))
+                .andExpect(jsonPath("$.code").value("SERVICE_BUSY"))
+                .andExpect(jsonPath("$.message", not(containsString("Hikari"))))
+                .andExpect(jsonPath("$.correlationId").value("corr-2"));
+    }
+
+    @Test
+    @DisplayName("only pool exhaustion is special: other database errors stay 500")
+    void otherDatabaseErrorsStay500() throws Exception {
+        mvc.perform(get("/test/sql-error"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"));
+    }
+
+    @Test
+    @DisplayName("cause-chain walk: finds the pool timeout at any depth and tolerates a missing chain")
+    void causeChainWalk() {
+        org.junit.jupiter.api.Assertions.assertTrue(GlobalExceptionHandler.isConnectionPoolExhausted(
+                new RuntimeException("a", new RuntimeException("b", new java.sql.SQLTransientConnectionException("c")))));
+        org.junit.jupiter.api.Assertions.assertFalse(GlobalExceptionHandler.isConnectionPoolExhausted(new RuntimeException("x")));
+        org.junit.jupiter.api.Assertions.assertFalse(GlobalExceptionHandler.isConnectionPoolExhausted(null));
+    }
+
+    @Test
     @DisplayName("Spring MVC errors keep their real status: wrong HTTP method is 405, not 500")
     void mvcErrorsKeepTheirStatus() throws Exception {
         mvc.perform(post("/test/conflict"))
@@ -99,6 +129,18 @@ class GlobalExceptionHandlerTest {
         @GetMapping("/test/boom")
         String boom() {
             throw new IllegalStateException("jdbc:mysql://secret-host:3306 refused connection");
+        }
+
+        @GetMapping("/test/pool-timeout")
+        String poolTimeout() {
+            throw new IllegalStateException("Could not open JPA EntityManager for transaction",
+                    new RuntimeException("Unable to acquire JDBC Connection",
+                            new java.sql.SQLTransientConnectionException("HikariPool-1 - Connection is not available, request timed out after 3002ms")));
+        }
+
+        @GetMapping("/test/sql-error")
+        String sqlError() {
+            throw new IllegalStateException("query failed", new java.sql.SQLSyntaxErrorException("bad sql"));
         }
 
         @PostMapping("/test/validate")

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sunny.flashsale.common.events.BookingEvent;
 import com.sunny.flashsale.common.events.BookingEventType;
 import com.sunny.flashsale.notification.repository.NotificationRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -27,11 +28,14 @@ public class NotificationService {
     private final NotificationRepository repository;
     private final NotificationSender sender;
     private final ObjectMapper mapper;
+    private final MeterRegistry metrics;
 
-    public NotificationService(NotificationRepository repository, NotificationSender sender, ObjectMapper mapper) {
+    public NotificationService(NotificationRepository repository, NotificationSender sender, ObjectMapper mapper,
+                               MeterRegistry metrics) {
         this.repository = repository;
         this.sender = sender;
         this.mapper = mapper;
+        this.metrics = metrics;
     }
 
     @Transactional
@@ -42,10 +46,12 @@ public class NotificationService {
             return;
         }
         if (!repository.insertIfNew(event.eventId(), event.userId(), type, toJson(event))) {
+            metrics.counter("flashsale.notifications", "type", type.name(), "result", "duplicate").increment();
             log.info("Duplicate event ignored: eventId={} bookingId={}", event.eventId(), event.bookingId());
             return;
         }
         sender.send(event.userId(), type, event);
+        metrics.counter("flashsale.notifications", "type", type.name(), "result", "sent").increment();
     }
 
     private static NotificationType typeFor(BookingEventType type) {

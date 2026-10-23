@@ -17,6 +17,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Optional;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
@@ -34,8 +35,10 @@ class PaymentServiceTest {
     @Mock PaymentRecorder recorder;
     @Mock PaymentGateway gateway;
 
+    private final io.micrometer.core.instrument.simple.SimpleMeterRegistry registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+
     private PaymentService service() {
-        return new PaymentService(payments, recorder, gateway);
+        return new PaymentService(payments, recorder, gateway, registry);
     }
 
     private static BookingEvent event(BookingEventType type, String reason) {
@@ -58,6 +61,7 @@ class PaymentServiceTest {
 
         verify(payments).insertPendingIfNew("b-1", "alice", AMOUNT);
         verify(gateway).charge("b-1", "alice", AMOUNT);
+        assertThat(registry.counter("flashsale.payments", "outcome", "succeeded").count()).isEqualTo(1.0);
         verify(recorder).recordOutcome("b-1", "alice", AMOUNT, true, null);
         verify(gateway, never()).refund(anyString(), org.mockito.ArgumentMatchers.any());
     }

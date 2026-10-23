@@ -94,6 +94,9 @@ public class SecurityConfig {
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(a -> a
                         .requestMatchers("/actuator/health/**", "/actuator/info").permitAll()
+                        // Scraped by Prometheus over the internal network. Safe to leave open ONLY because nginx and the Ingress
+                        // route nothing but /api and /healthz; never publish this port to the internet.
+                        .requestMatchers("/actuator/prometheus").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/refresh").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/events/*/availability").permitAll()   // public sale info
                         .requestMatchers(HttpMethod.POST, "/api/v1/bookings/*/confirm").hasRole("ADMIN")

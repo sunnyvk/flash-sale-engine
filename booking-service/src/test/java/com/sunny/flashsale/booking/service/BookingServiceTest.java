@@ -6,6 +6,7 @@ import com.sunny.flashsale.booking.domain.BookingStatus;
 import com.sunny.flashsale.booking.domain.FlashEvent;
 import com.sunny.flashsale.booking.domain.Seat;
 import com.sunny.flashsale.booking.domain.SeatStatus;
+import com.sunny.flashsale.booking.metrics.BookingMetrics;
 import com.sunny.flashsale.booking.outbox.OutboxWriter;
 import com.sunny.flashsale.booking.repository.BookingRepository;
 import com.sunny.flashsale.booking.repository.FlashEventRepository;
@@ -13,6 +14,7 @@ import com.sunny.flashsale.booking.repository.SeatRepository;
 import com.sunny.flashsale.booking.repository.SeatStatusCount;
 import com.sunny.flashsale.common.error.ApiException;
 import com.sunny.flashsale.common.events.BookingEventType;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -61,6 +63,7 @@ class BookingServiceTest {
     @Mock FlashEvent event;
     @Mock OutboxWriter outbox;
 
+    private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private BookingService service;
 
     @BeforeEach
@@ -74,7 +77,8 @@ class BookingServiceTest {
 
         Clock fixed = Clock.fixed(NOW, ZoneOffset.UTC);
         BookingProperties props = new BookingProperties(Duration.ofMinutes(5), LockingStrategy.ATOMIC_UPDATE);
-        service = new BookingService(events, seats, bookings, List.of(atomicHolder, pessimisticHolder), props, fixed, outbox);
+        service = new BookingService(events, seats, bookings, List.of(atomicHolder, pessimisticHolder), props, fixed, outbox,
+                new BookingMetrics(registry));
     }
 
     // ------------------------------------------------------------------ book
@@ -432,5 +436,47 @@ class BookingServiceTest {
     private static DataIntegrityViolationException duplicate(String indexName) {
         return new DataIntegrityViolationException("could not execute statement",
                 new SQLIntegrityConstraintViolationException("Duplicate entry '42' for key '" + indexName + "'"));
+    }
+
+    // ------------------------------------------------------------------ metrics
+
+    @Test
+    @DisplayName("metrics: cancel() counts one 'cancelled' transition, confirm() one 'confirmed'")
+    void countsTransitions() {
+        Booking toCancel = new Booking("b-1", USER, EVENT_ID, SEAT_ID, new BigDecimal("1500.00"), KEY);
+        Booking toConfirm = new Booking("b-2", USER, EVENT_ID, 43L, new BigDecimal("1500.00"), "key-2");
+        when(bookings.findById("b-1")).thenReturn(Optional.of(toCancel));
+        when(bookings.findById("b-2")).thenReturn(Optional.of(toConfirm));
+        when(seats.release(SEAT_ID)).thenReturn(1);
+        when(seats.markBooked(43L)).thenReturn(1);
+
+        service.cancel("b-1", "payment failed");
+        service.confirm("b-2");
+
+        assertThat(registry.counter("flashsale.booking.transitions", "to", "cancelled").count()).isEqualTo(1.0);
+        assertThat(registry.counter("flashsale.booking.transitions", "to", "confirmed").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    @DisplayName("metrics: a repeated cancel is a no-op and is not counted twice")
+    void repeatedCancelIsNotCounted() {
+        Booking cancelled = new Booking("b-1", USER, EVENT_ID, SEAT_ID, new BigDecimal("1500.00"), KEY);
+        cancelled.markCancelled("payment failed");
+        when(bookings.findById("b-1")).thenReturn(Optional.of(cancelled));
+
+        service.cancel("b-1", "payment failed");
+
+        assertThat(registry.counter("flashsale.booking.transitions", "to", "cancelled").count()).isZero();
+    }
+
+    @Test
+    @DisplayName("metrics: the DB unique-index backstop is counted (expected to stay at 0 in production)")
+    void countsBackstop() {
+        when(bookings.saveAndFlush(any(Booking.class))).thenThrow(new DataIntegrityViolationException("x",
+                new SQLIntegrityConstraintViolationException("Duplicate entry '42' for key 'bookings.uq_booking_active_seat'")));
+
+        assertThatThrownBy(() -> service.book(USER, EVENT_ID, "A-001", KEY)).isInstanceOf(ApiException.class);
+
+        assertThat(registry.counter("flashsale.db.backstop").count()).isEqualTo(1.0);
     }
 }

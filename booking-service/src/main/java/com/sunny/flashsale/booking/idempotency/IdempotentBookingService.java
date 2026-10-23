@@ -5,6 +5,7 @@ import com.sunny.flashsale.booking.idempotency.IdempotencyStore.Bypass;
 import com.sunny.flashsale.booking.idempotency.IdempotencyStore.InProgress;
 import com.sunny.flashsale.booking.idempotency.IdempotencyStore.Mismatch;
 import com.sunny.flashsale.booking.idempotency.IdempotencyStore.Replay;
+import com.sunny.flashsale.booking.metrics.BookingMetrics;
 import com.sunny.flashsale.booking.service.BookingErrors;
 import com.sunny.flashsale.booking.service.BookingService;
 import com.sunny.flashsale.common.error.ApiException;
@@ -32,13 +33,40 @@ public class IdempotentBookingService {
 
     private final BookingService bookingService;
     private final IdempotencyStore store;
+    private final BookingMetrics metrics;
 
-    public IdempotentBookingService(BookingService bookingService, IdempotencyStore store) {
+    public IdempotentBookingService(BookingService bookingService, IdempotencyStore store, BookingMetrics metrics) {
         this.bookingService = bookingService;
         this.store = store;
+        this.metrics = metrics;
     }
 
+    /** Counts every attempt by outcome: the sold-out / retry / error mix is what the flash-sale dashboard shows. */
     public BookingResult book(String userId, long eventId, String seatNumber, String idempotencyKey) {
+        try {
+            BookingResult result = process(userId, eventId, seatNumber, idempotencyKey);
+            metrics.attempt(result.replayed() ? "replayed" : "created");
+            return result;
+        } catch (ApiException e) {
+            metrics.attempt(outcomeOf(e));
+            throw e;
+        } catch (RuntimeException e) {
+            metrics.attempt("error");
+            throw e;
+        }
+    }
+
+    private static String outcomeOf(ApiException e) {
+        return switch (e.getCode()) {
+            case BookingErrors.SEAT_UNAVAILABLE -> "seat_unavailable";
+            case BookingErrors.NO_SEAT_AVAILABLE -> "sold_out";
+            case BookingErrors.REQUEST_IN_PROGRESS -> "in_progress";
+            case BookingErrors.IDEMPOTENCY_KEY_REUSED -> "key_reused";
+            default -> "rejected";            // validation, unknown event or seat: the client's mistake, not ours
+        };
+    }
+
+    private BookingResult process(String userId, long eventId, String seatNumber, String idempotencyKey) {
         BookingService.validateIdempotencyKey(idempotencyKey);
         String fingerprint = fingerprint(eventId, seatNumber);
 

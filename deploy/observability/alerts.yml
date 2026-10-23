@@ -1,0 +1,80 @@
+# Alert rules. Each one answers "what would I want to be woken up for?", and the comment says what to do about it.
+# They are evaluated by Prometheus and visible at http://localhost:9090/alerts. Delivery (Slack, e-mail, pager) needs
+# Alertmanager, which this single-node setup deliberately leaves out.
+groups:
+  - name: flash-sale
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"booking-service|payment-service|notification-service"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} is not answering scrapes"
+          action: "docker compose logs {{ $labels.job }}; check the health endpoint."
+
+      - alert: DoubleBookingPrevented
+        # Expected value is exactly 0. The application lock failed to stop two buyers on one seat and the database
+        # unique index caught it. Nobody was oversold, but a lock path is broken: find it before the next sale.
+        expr: increase(flashsale_db_backstop_total[10m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "The DB unique index prevented a double booking"
+          action: "Search the booking-service logs for 'DB backstop prevented a double booking'."
+
+      - alert: OutboxBacklog
+        # Events are written to MySQL but not reaching Kafka: payments and notifications stall, seats stay held.
+        expr: flashsale_outbox_oldest_pending_age_seconds > 60
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "The oldest unpublished event is {{ $value | humanizeDuration }} old"
+          action: "Is Kafka healthy? Look for 'Kafka publish failed' in the booking-service logs."
+
+      - alert: OutboxPublishFailing
+        expr: increase(flashsale_outbox_publish_failures_total[5m]) > 3
+        labels: { severity: warning }
+        annotations:
+          summary: "Kafka publishes from the outbox are failing"
+
+      - alert: PaymentTimeoutsHappening
+        # The reaper only cancels when no payment outcome arrived in hold-time + grace. A few are normal in a chaos test;
+        # a steady stream means payment events are being lost or dead-lettered.
+        expr: increase(flashsale_reaper_cancelled_total[15m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Bookings are being cancelled because no payment result arrived"
+          action: "Check payment-service and the payment.events dead-letter topic."
+
+      - alert: HighServerErrorRate
+        expr: |
+          sum by (application) (rate(http_server_requests_seconds_count{status=~"5.."}[5m]))
+            / sum by (application) (rate(http_server_requests_seconds_count[5m])) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.application }}: more than 5% of requests fail with 5xx"
+
+      - alert: SlowBookingRequests
+        # Same bar as the k6 threshold: p95 of POST /api/v1/bookings under 1.5 s.
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{application="booking-service",method="POST",uri="/api/v1/bookings"}[5m]))) > 1.5
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "p95 booking latency is {{ $value | humanizeDuration }}"
+          action: "Look at the database connection pool panel: requests queue there first."
+
+      - alert: DatabasePoolSaturated
+        expr: hikaricp_connections_active / hikaricp_connections_max > 0.9
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.application }}: over 90% of database connections are busy"
+          action: "Raise DB_POOL_SIZE only after checking for slow queries or long transactions."
+
+      - alert: KafkaConsumerLag
+        expr: max by (application) (kafka_consumer_fetch_manager_records_lag_max) > 1000
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.application }} is more than 1000 messages behind on Kafka"

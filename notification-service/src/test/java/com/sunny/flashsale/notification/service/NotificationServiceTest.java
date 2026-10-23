@@ -14,6 +14,7 @@ import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 import java.math.BigDecimal;
 import java.time.Instant;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -29,11 +30,12 @@ class NotificationServiceTest {
     @Mock NotificationRepository repository;
     @Mock NotificationSender sender;
 
+    private final io.micrometer.core.instrument.simple.SimpleMeterRegistry registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
     private NotificationService service;
 
     @BeforeEach
     void setUp() {
-        service = new NotificationService(repository, sender, Jackson2ObjectMapperBuilder.json().build());
+        service = new NotificationService(repository, sender, Jackson2ObjectMapperBuilder.json().build(), registry);
     }
 
     private static BookingEvent event(BookingEventType type) {
@@ -50,6 +52,7 @@ class NotificationServiceTest {
         service.handle(event);
 
         verify(sender).send("alice", NotificationType.BOOKING_CONFIRMED, event);
+        assertThat(registry.counter("flashsale.notifications", "type", "BOOKING_CONFIRMED", "result", "sent").count()).isEqualTo(1.0);
     }
 
     @Test

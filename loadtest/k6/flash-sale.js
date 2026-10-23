@@ -17,6 +17,7 @@ const EVENT_ID = Number(__ENV.EVENT_ID || 1);
 const SEATS = Number(__ENV.SEATS || 100);          // must equal the event's total_seats (the demo seed has 100)
 const USERS = Number(__ENV.USERS || 300);          // one virtual user = one buyer
 const RETRY_PCT = Number(__ENV.RETRY_PCT || 20);   // share of buyers who double-click: same request, same Idempotency-Key
+const P95_BOOK_MS = Number(__ENV.P95_BOOK_MS || 1500);   // latency bar; raise it for a slow machine, but report the real number
 const RUN_ID = __ENV.RUN_ID || String(Date.now());  // makes usernames unique per run, so reruns never collide
 
 const seatsSold = new Counter('seats_sold_201');
@@ -40,7 +41,7 @@ export const options = {
     'unexpected_responses': ['count==0'],                 // no 5xx, no 401, no 429
     'seats_sold_201': [`count<=${SEATS}`],                // the headline: never more winners than seats
     'oversell_detected': ['count==0'],                    // and the database agrees (checked in teardown)
-    'http_req_duration{name:book}': ['p(95)<1500'],
+    'http_req_duration{name:book}': [`p(95)<${P95_BOOK_MS}`],
     'http_req_duration{name:availability}': ['p(95)<500'],
   },
 };
@@ -87,9 +88,6 @@ export function buy(data) {
   if (Math.random() * 100 < RETRY_PCT) {
     const retry = http.post(`${BASE_URL}/api/v1/bookings`, body, params);   // same key: must not create a second booking
     record(retry);
-    if (retry.headers['Idempotent-Replayed'] === 'true') {
-      replays.add(1);
-    }
   }
 }
 
@@ -112,7 +110,13 @@ export function teardown() {
 
 function record(res) {
   if (res.status === 201) {
-    seatsSold.add(1);
+    // A replay answers 201 too, with the ORIGINAL booking and the header Idempotent-Replayed: true. It is not a new seat,
+    // so it must not count as a sale (counting it made 100 real sales look like 113 on the first run).
+    if (res.headers['Idempotent-Replayed'] === 'true') {
+      replays.add(1);
+    } else {
+      seatsSold.add(1);
+    }
   } else if (res.status === 409) {
     soldOut.add(1);
   } else {

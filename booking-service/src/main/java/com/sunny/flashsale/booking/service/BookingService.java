@@ -6,6 +6,7 @@ import com.sunny.flashsale.booking.domain.BookingStatus;
 import com.sunny.flashsale.booking.domain.FlashEvent;
 import com.sunny.flashsale.booking.outbox.OutboxWriter;
 import com.sunny.flashsale.booking.domain.Seat;
+import com.sunny.flashsale.booking.metrics.BookingMetrics;
 import com.sunny.flashsale.booking.repository.BookingRepository;
 import com.sunny.flashsale.booking.repository.FlashEventRepository;
 import com.sunny.flashsale.booking.repository.SeatRepository;
@@ -49,6 +50,7 @@ public class BookingService {
     private final BookingProperties properties;
     private final Clock clock;
     private final OutboxWriter outbox;
+    private final BookingMetrics metrics;
 
     public BookingService(FlashEventRepository events,
                           SeatRepository seats,
@@ -56,13 +58,15 @@ public class BookingService {
                           List<SeatHolder> seatHolders,
                           BookingProperties properties,
                           Clock clock,
-                          OutboxWriter outbox) {
+                          OutboxWriter outbox,
+                          BookingMetrics metrics) {
         this.events = events;
         this.seats = seats;
         this.bookings = bookings;
         this.properties = properties;
         this.clock = clock;
         this.outbox = outbox;
+        this.metrics = metrics;
         seatHolders.forEach(holder -> holders.put(holder.strategy(), holder));
     }
 
@@ -118,6 +122,7 @@ public class BookingService {
         }
         booking.markConfirmed();
         outbox.append(BookingEventType.BOOKING_CONFIRMED, booking, null);
+        metrics.transition("confirmed");
         log.info("Booking confirmed: bookingId={} seatId={}", bookingId, booking.getSeatId());
         return booking;
     }
@@ -137,6 +142,7 @@ public class BookingService {
         }
         booking.markCancelled(reason);
         outbox.append(BookingEventType.BOOKING_CANCELLED, booking, reason);
+        metrics.transition("cancelled");
         log.info("Booking cancelled, seat released: bookingId={} seatId={} reason={}", bookingId, booking.getSeatId(), reason);
         return booking;
     }
@@ -233,15 +239,16 @@ public class BookingService {
     }
 
     /** Turns the database's unique-index violations into the client-facing errors they represent. */
-    private static RuntimeException translate(DataIntegrityViolationException e) {
+    private RuntimeException translate(DataIntegrityViolationException e) {
         String cause = String.valueOf(NestedExceptionUtils.getMostSpecificCause(e).getMessage());
         if (cause.contains("uq_booking_user_idempotency")) {
             return ApiException.conflict(BookingErrors.DUPLICATE_REQUEST, "A booking with this Idempotency-Key already exists");
         }
         if (cause.contains("uq_booking_active_seat")) {
             // The application-level lock should have stopped this. If you ever see this line, a lock was bypassed
-            // and the database saved us: worth an alert in phase 10.
+            // and the database saved us: alert on flashsale_db_backstop_total (deploy/observability/alerts.yml).
             log.warn("DB backstop prevented a double booking (uq_booking_active_seat)");
+            metrics.dbBackstopTriggered();
             return BookingErrors.seatUnavailable();
         }
         return e;

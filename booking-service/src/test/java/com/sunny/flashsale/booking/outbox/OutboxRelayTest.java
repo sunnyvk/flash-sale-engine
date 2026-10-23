@@ -1,5 +1,6 @@
 package com.sunny.flashsale.booking.outbox;
 
+import com.sunny.flashsale.booking.metrics.BookingMetrics;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -49,11 +50,12 @@ class OutboxRelayTest {
     @Captor ArgumentCaptor<ProducerRecord<String, String>> sent;
     @Captor ArgumentCaptor<List<Object[]>> marked;
 
+    private final io.micrometer.core.instrument.simple.SimpleMeterRegistry registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
     private final CompletableFuture<SendResult<String, String>> ok = CompletableFuture.completedFuture(null);
 
     private OutboxRelay relay(int batchSize) {
         OutboxProperties props = new OutboxProperties(true, batchSize, Duration.ofMillis(500), Duration.ofSeconds(1), Duration.ofDays(7));
-        return new OutboxRelay(jdbc, kafka, new TransactionTemplate(txManager), props, Clock.fixed(NOW, ZoneOffset.UTC));
+        return new OutboxRelay(jdbc, kafka, new TransactionTemplate(txManager), props, Clock.fixed(NOW, ZoneOffset.UTC), new BookingMetrics(registry));
     }
 
     private void pending(int batchSize, List<OutboxRelay.Row>... batches) {
@@ -87,6 +89,7 @@ class OutboxRelayTest {
         assertThat(new String(sent.getAllValues().get(1).headers().lastHeader("event-type").value(), StandardCharsets.UTF_8)).isEqualTo("BOOKING_CONFIRMED");
         verify(jdbc).batchUpdate(anyString(), marked.capture());
         assertThat(marked.getValue()).extracting(a -> a[1]).containsExactly(1L, 2L);
+        assertThat(registry.counter("flashsale.outbox.published").count()).isEqualTo(2.0);
     }
 
     @Test
@@ -114,6 +117,7 @@ class OutboxRelayTest {
         assertThat(relay(10).publishBatch()).isZero();
 
         verify(jdbc, never()).batchUpdate(anyString(), anyList());
+        assertThat(registry.counter("flashsale.outbox.publish.failures").count()).isEqualTo(1.0);
     }
 
     @Test

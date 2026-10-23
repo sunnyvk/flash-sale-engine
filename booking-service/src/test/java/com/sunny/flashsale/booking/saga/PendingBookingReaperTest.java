@@ -1,6 +1,7 @@
 package com.sunny.flashsale.booking.saga;
 
 import com.sunny.flashsale.booking.config.BookingProperties;
+import com.sunny.flashsale.booking.metrics.BookingMetrics;
 import com.sunny.flashsale.booking.service.BookingErrors;
 import com.sunny.flashsale.booking.service.BookingService;
 import com.sunny.flashsale.booking.service.LockingStrategy;
@@ -35,9 +36,11 @@ class PendingBookingReaperTest {
     @Mock JdbcTemplate jdbc;
     @Mock BookingService bookings;
 
+    private final io.micrometer.core.instrument.simple.SimpleMeterRegistry registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+
     private PendingBookingReaper reaper() {
         BookingProperties props = new BookingProperties(Duration.ofMinutes(5), LockingStrategy.ATOMIC_UPDATE);
-        return new PendingBookingReaper(jdbc, bookings, props, Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofSeconds(30), 100);
+        return new PendingBookingReaper(jdbc, bookings, props, Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofSeconds(30), 100, new BookingMetrics(registry));
     }
 
     @Test
@@ -47,6 +50,7 @@ class PendingBookingReaperTest {
         when(jdbc.queryForList(anyString(), eq(String.class), eq(cutoff), eq(100))).thenReturn(List.of("b-1", "b-2"));
 
         assertThat(reaper().reapOnce()).isEqualTo(2);
+        assertThat(registry.counter("flashsale.reaper.cancelled").count()).isEqualTo(2.0);
 
         verify(bookings).cancel("b-1", "payment timeout");
         verify(bookings).cancel("b-2", "payment timeout");

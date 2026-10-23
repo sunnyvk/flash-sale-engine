@@ -35,6 +35,12 @@ step "3. protected route without a token is rejected"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE_URL/api/v1/bookings" -H 'Content-Type: application/json' -d "{\"eventId\":$EVENT_ID}")
 [ "$CODE" = "401" ] || fail "expected 401 without a token, got $CODE"
 
+if [ "$HEALTH_PATH" = "/healthz" ]; then   # only meaningful behind the proxy; booking-service itself serves it to Prometheus
+  step "3b. metrics are NOT reachable through the public proxy"
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/actuator/prometheus")
+  [ "$CODE" = "404" ] || fail "/actuator/prometheus must not be exposed through nginx (got HTTP $CODE)"
+fi
+
 step "4. availability (public)"
 AVAILABLE=$(curl -fsS "$BASE_URL/api/v1/events/$EVENT_ID/availability" | jq -er .available)
 echo "free seats: $AVAILABLE"

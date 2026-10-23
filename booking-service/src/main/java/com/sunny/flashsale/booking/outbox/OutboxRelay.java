@@ -1,5 +1,6 @@
 package com.sunny.flashsale.booking.outbox;
 
+import com.sunny.flashsale.booking.metrics.BookingMetrics;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,14 +57,16 @@ public class OutboxRelay {
     private final TransactionTemplate tx;
     private final OutboxProperties properties;
     private final Clock clock;
+    private final BookingMetrics metrics;
 
     public OutboxRelay(JdbcTemplate jdbc, KafkaTemplate<String, String> kafka, TransactionTemplate tx,
-                       OutboxProperties properties, Clock clock) {
+                       OutboxProperties properties, Clock clock, BookingMetrics metrics) {
         this.jdbc = jdbc;
         this.kafka = kafka;
         this.tx = tx;
         this.properties = properties;
         this.clock = clock;
+        this.metrics = metrics;
     }
 
     @Scheduled(fixedDelayString = "${booking.outbox.poll-interval:PT0.5S}")
@@ -97,9 +100,11 @@ public class OutboxRelay {
             log.warn("Outbox relay interrupted after {} of {} rows", sent.size(), rows.size());
         } catch (ExecutionException | TimeoutException | RuntimeException e) {
             // Stop here: skipping the failed row and sending later ones would reorder events.
+            metrics.outboxPublishFailed();
             log.warn("Kafka publish failed after {} of {} rows, leaving the rest PENDING: {}", sent.size(), rows.size(), e.toString());
         }
         markPublished(sent);
+        metrics.outboxPublished(sent.size());
         return sent.size();
     }
 

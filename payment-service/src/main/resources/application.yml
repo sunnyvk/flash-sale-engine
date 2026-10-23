@@ -66,12 +66,20 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
   endpoint:
     health:
       probes:
         enabled: true
       show-details: ${HEALTH_DETAILS:never}
+  metrics:
+    tags:
+      application: payment-service                      # every series carries the service name, so one dashboard serves all three
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true            # histogram buckets: Grafana computes p95/p99 across instances
+      slo:
+        http.server.requests: 100ms,250ms,500ms,1s,2s
 
 logging:
   structured:
